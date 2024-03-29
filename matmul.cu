@@ -5,7 +5,10 @@ enum class Method
 {
   naive,
   tiled1,
-  tiled2
+  tiled2,
+  tiled3,
+  tiled4,
+  tiled5,
 };
 
 __global__ void matmul_kernel(double const *A, double const *B, double *res,
@@ -30,37 +33,28 @@ __global__ void matmul_kernel_tiled(double const *A, double const *B, double *C,
   int tile_size = blockDim.x * blockDim.y;
   int tid = threadIdx.x + threadIdx.y*blockDim.x;  // index within block
 
-  // int TM = (M+tile_size-1) / tile_size; //  num row tiles in A
   int TN = (N+tile_size-1) / tile_size;  // num tiles in N direction
-  int TK = (K+tile_size-1) / tile_size;  // num tiles in K directions
 
   int row_tile_A = blockIdx.x / TN;
   int col_tile_A = blockIdx.x % TN;
-
-
   int row_tile_B = col_tile_A;
-  // int row_tile_B = blockIdx.y / TK;
   int col_tile_B = blockIdx.y;
 
   if (tid == 0) {
     smem = 0;
   }
 
-  // if (tid == 0) {
-  //   printf("tileA = [%d, %d] tileB = [%d, %d] block = [%d, %d]\n",
-  //          row_tile_A, col_tile_A,
-  //          row_tile_B, col_tile_B,
-  //          blockIdx.x, blockIdx.y);
-  // }
-
   for (int colB = col_tile_B*tile_size; colB < min(N, (col_tile_B+1)*tile_size); colB++) {
     int rowB = row_tile_B*tile_size + tid;
+    if (rowB >= N) return;
+
     double b = B[rowB*K + colB];
 
     for (int rowA = row_tile_A*tile_size; rowA < min(M, (row_tile_A+1)*tile_size); rowA++) {
 
       // save into shared
       int colA = col_tile_A*tile_size + tid;
+      if (colA >= N) return;
       double a = A[rowA*M + colA];
       double c = a*b;
       atomicAdd(&smem, c);
@@ -68,15 +62,170 @@ __global__ void matmul_kernel_tiled(double const *A, double const *B, double *C,
       // write into global
       __syncthreads();
       if (tid == 0) {
-        // printf("A[%d, %d] += %f tiles [%d,%d] * [%d,%d]\n", rowA, colB, c,
-        //    row_tile_A, col_tile_A,
-        //    row_tile_B, col_tile_B);
         atomicAdd(&C[rowA*K + colB], smem);
         smem = 0;
       }
     }
   }
 }
+
+__global__ void matmul_kernel_tiled2(double const *A, double const *B, double *C, int M, int N, int K)
+{
+  extern __shared__ double smem[];
+
+  int tile_size = blockDim.x * blockDim.y;
+  int tid = threadIdx.x + threadIdx.y*blockDim.x;  // index within block
+
+  int TN = (N+tile_size-1) / tile_size;  // num tiles in N direction
+
+  int row_tile_A = blockIdx.x / TN;
+  int col_tile_A = blockIdx.x % TN;
+  int row_tile_B = col_tile_A;
+  int col_tile_B = blockIdx.y;
+
+  for (int colB = col_tile_B*tile_size; colB < min(N, (col_tile_B+1)*tile_size); colB++) {
+    int rowB = row_tile_B*tile_size + tid;
+    if (rowB >= N) return;
+
+    double b = B[rowB*K + colB];
+
+    for (int rowA = row_tile_A*tile_size; rowA < min(M, (row_tile_A+1)*tile_size); rowA++) {
+
+      // save into shared
+      int colA = col_tile_A*tile_size + tid;
+      if (colA >= N) return;
+      double a = A[rowA*M + colA];
+      double c = a*b;
+      smem[tid] = c;
+
+      // write into global
+      __syncthreads();
+      if (tid == 0) {
+        double ans = 0;
+        for (int i = 0; i < tile_size; i++)
+          ans += smem[i];
+        atomicAdd(&C[rowA*K + colB], ans);
+      }
+    }
+  }
+}
+
+__global__ void matmul_kernel_tiled3(double const *A, double const *B, double *C, int M, int N, int K)
+{
+  extern __shared__ double smem[];
+
+  int tile_size = blockDim.x * blockDim.y;
+  int tid = threadIdx.x + threadIdx.y*blockDim.x;  // index within block
+
+  int TN = (N+tile_size-1) / tile_size;  // num tiles in N direction
+
+  int row_tile_A = blockIdx.x / TN;
+  int col_tile_A = blockIdx.x % TN;
+  int row_tile_B = col_tile_A;
+  int col_tile_B = blockIdx.y;
+
+  for (int colB = col_tile_B*tile_size; colB < min(N, (col_tile_B+1)*tile_size); colB++) {
+    int rowB = row_tile_B*tile_size + tid;
+    if (rowB >= N) return;
+
+    double b = B[rowB*K + colB];
+
+    for (int rowA = row_tile_A*tile_size; rowA < min(M, (row_tile_A+1)*tile_size); rowA++) {
+
+      // save into shared
+      int colA = col_tile_A*tile_size + tid;
+      if (colA >= N) return;
+      double a = A[rowA*M + colA];
+      double c = a*b;
+      int rowS = rowA - row_tile_A*tile_size;
+      smem[rowS*tile_size + tid] = c;
+
+      // write into global
+    }
+    __syncthreads();
+
+    double ans = 0;
+    for (int i = 0; i < tile_size; i++)
+      ans += smem[tid*tile_size + i];
+
+    int rowA = row_tile_A*tile_size + tid;
+    atomicAdd(&C[rowA*K + colB], ans);
+
+    // if (tid == 0) {
+    //   double ans = 0;
+    //   for (int i = 0; i < tile_size; i++)
+    //     ans += smem[i];
+    //   atomicAdd(&C[rowA*K + colB], ans);
+    // }
+
+  }
+}
+
+__global__ void matmul_kernel_tiled4(double const *A, double const *B, double *C, int M, int N, int K)
+{
+  extern __shared__ double smem[];
+  int tile_size = blockDim.x;
+  double* sA = &smem[0];
+  double* sB = &smem[tile_size*tile_size];
+
+  int TN = (N+tile_size-1) / tile_size;  // num tiles in N direction
+  int row_tile_A = blockIdx.x / TN;
+  int col_tile_A = blockIdx.x % TN;
+  int row_tile_B = col_tile_A;
+  int col_tile_B = blockIdx.y;
+
+  int rowA = row_tile_A*tile_size + threadIdx.x;
+  int colA = col_tile_A*tile_size + threadIdx.y;
+  sA[threadIdx.x*tile_size + threadIdx.y] = (rowA < M && colA < N) ? A[ rowA*N + colA ] : 0;
+  int rowB = row_tile_B*tile_size + threadIdx.x;
+  int colB = col_tile_B*tile_size + threadIdx.y;
+  sB[threadIdx.x*tile_size + threadIdx.y] = (rowB < N && colB < K) ? B[ rowB*K + colB ] : 0;
+  __syncthreads();
+
+  double tmp = 0;
+  for (int k = 0; k < tile_size; k++) {
+    tmp += sA[threadIdx.y * tile_size + k] * sB[k * tile_size + threadIdx.x];
+  }
+
+  if (rowA < N && colB < K) {
+    atomicAdd(&C[rowA * K + colB], tmp);
+  }
+}
+
+__global__ void matmul_kernel_tiled5(double const *A, double const *B, double *C, int M, int N, int K)
+{
+  extern __shared__ double smem[];
+  int tile_size = blockDim.x;
+  double *sA = &smem[0];
+  double *sB = &smem[tile_size*tile_size];
+
+  int nctA = (N + tile_size - 1) / tile_size;
+  int rtA = blockIdx.x;
+  int rA = rtA*tile_size + threadIdx.x;
+  int ctB = blockIdx.y;
+  int cB = ctB*tile_size + threadIdx.y;
+
+  for ( int ctA = 0; ctA < nctA; ctA++) {
+
+    // load A
+    int cA = ctA*tile_size + threadIdx.y;
+    sA[threadIdx.x * tile_size + threadIdx.y] = (rA < M && cA < N) ? A[rA*N + cA] : 0;
+    int rtB = ctA;
+    int rB = rtB*tile_size + threadIdx.x;
+    // load B
+    sB[threadIdx.x * tile_size + threadIdx.y] = (rB < N && cB < N) ? B[rB*K + cB] : 0;
+    __syncthreads();
+
+    // do the product
+    double tmp{0};
+    for (int i = 0; i < tile_size; i++)
+      tmp += sA[threadIdx.x*tile_size + i] * sB[i*tile_size + threadIdx.y];
+
+    // atomicAdd(&C[rA*K + cB], tmp);
+    C[rA*K + cB] += tmp;
+  }
+}
+
 
 float matmul(double const *A, double const *B, double *res, int M, int N, int K, Method method = Method::naive)
 {
@@ -93,17 +242,46 @@ float matmul(double const *A, double const *B, double *res, int M, int N, int K,
     cudaEventRecord(stop);
   }
   else if (method == Method::tiled1) {
-    unsigned int tile_size = 4;
+    unsigned int tile_size = 32;
     dim3 nt {tile_size, 1, 1};
     int ntM = (M+tile_size-1)/tile_size;
     int ntN = (N+tile_size-1)/tile_size;
     int ntK = (K+tile_size-1)/tile_size;
     dim3 nb( ntM * ntN, ntK, 1);
-    std::cout << "nb = " << nb.x << " x " << nb.y  << std::endl;
-
-
     cudaEventRecord(start);
     matmul_kernel_tiled<<<nb,nt>>>(A, B, res, M, N, K);
+    cudaEventRecord(stop);
+  }
+  else if (method == Method::tiled2) {
+    unsigned int tile_size = 32;
+    dim3 nt {tile_size, 1, 1};
+    int ntM = (M+tile_size-1)/tile_size;
+    int ntN = (N+tile_size-1)/tile_size;
+    int ntK = (K+tile_size-1)/tile_size;
+    dim3 nb( ntM * ntN, ntK, 1);
+    cudaEventRecord(start);
+    matmul_kernel_tiled2<<<nb,nt,tile_size>>>(A, B, res, M, N, K);
+    cudaEventRecord(stop);
+  }
+  else if (method == Method::tiled4) {
+    unsigned int tile_size = 8;
+    dim3 nt {tile_size, tile_size, 1};
+    int ntM = (M+tile_size-1)/tile_size;
+    int ntN = (N+tile_size-1)/tile_size;
+    int ntK = (K+tile_size-1)/tile_size;
+    dim3 nb( ntM * ntN, ntK, 1);
+    cudaEventRecord(start);
+    matmul_kernel_tiled4<<<nb,nt,2*tile_size*tile_size*sizeof(double)>>>(A, B, res, M, N, K);
+    cudaEventRecord(stop);
+  }
+  else if (method == Method::tiled5) {
+    unsigned int tile_size = 16;
+    dim3 nt {tile_size, tile_size, 1};
+    int ntN = (N+tile_size-1)/tile_size;
+    int ntK = (K+tile_size-1)/tile_size;
+    dim3 nb( ntN, ntK, 1);
+    cudaEventRecord(start);
+    matmul_kernel_tiled5<<<nb,nt,2*tile_size*tile_size*sizeof(double)>>>(A, B, res, M, N, K);
     cudaEventRecord(stop);
   }
 
@@ -129,7 +307,7 @@ bool compare(thrust::device_vector<T> const & v1, thrust::device_vector<T> const
   return (num_errors == 0);
 }
 
-void generate_matrices_and_multiply(int M, int N, int K)
+bool generate_matrices_and_multiply(int M, int N, int K)
 {
   thrust::device_vector<double> A(M*N);
   thrust::device_vector<double> B(N*K);
@@ -139,23 +317,20 @@ void generate_matrices_and_multiply(int M, int N, int K)
   thrust::fill(A.begin(), A.end(), 1);
   thrust::fill(B.begin(), B.end(), 2);
 
-  auto t1 = matmul(A.data().get(), B.data().get(), C_ref.data().get(), M, N, K, Method::naive);
-  auto t2 = matmul(A.data().get(), B.data().get(), C.data().get(), M, N, K, Method::tiled1);
-  compare(C_ref, C);
-  // auto t3 = matmul_tiled1(A.data().get(), B.data().get(), C.data().get(), M, N, K);
-  // compare(C_ref, C);
+  std::vector<float> timings;
 
-  std::cout << "t1 = " << t1 << std::endl;
-  std::cout << "t2 = " << t2 << std::endl;
-  // std::cout << "t3 = " << t3 << std::endl;
-
-
-
-  // for (int row = 0; row < M; row++) {
-  //   for (int col = 0; col < K; col++) {
-  //     std::cout << C[row * K + col] << " ";
-  //   }
-  //   std::cout << std::endl;
-  // }
-
+  timings.push_back(matmul(A.data().get(), B.data().get(), C_ref.data().get(), M, N, K, Method::naive) );
+  timings.push_back(matmul(A.data().get(), B.data().get(), C.data().get(), M, N, K, Method::tiled1));
+  if (M*N*K < 1e6 && !compare(C_ref, C)) return false;
+  // timings.push_back(matmul(A.data().get(), B.data().get(), C.data().get(), M, N, K, Method::tiled2));
+  timings.push_back(matmul(A.data().get(), B.data().get(), C.data().get(), M, N, K, Method::tiled4));
+  if (M*N*K < 1e6 && !compare(C_ref, C)) return false;
+  timings.push_back(matmul(A.data().get(), B.data().get(), C.data().get(), M, N, K, Method::tiled5));
+  if (M*N*K < 1e6 && !compare(C_ref, C)) return false;
+  if (M*N*K >= 1e6) {
+    for (int i = 0; i < timings.size(); i++) {
+      std::cout << "timing[" << i << "] = " << timings[i] << std::endl;
+    }
+  }
+  return true;
 }
